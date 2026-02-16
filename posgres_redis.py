@@ -213,6 +213,10 @@ def log_attendance(emp_id, company_id, **kwargs):
       - Skips unknown users
       - Handles string or date/time objects
       - Queue-safe (**kwargs)
+      - Inserts into attendance1
+      - Logs FSM events in attendance_fsm_history
+      - Updates daily summary in attendance_summary
+      - Sends webhook
     """
     import time
     from datetime import datetime, date, time as time_cls
@@ -243,7 +247,6 @@ def log_attendance(emp_id, company_id, **kwargs):
     # --- 4. SAFE DATE/TIME CONVERSION ---
     now = datetime.now()
 
-    # Convert string to date/time if needed
     if isinstance(attendance_date, str):
         try:
             attendance_date = datetime.fromisoformat(attendance_date).date()
@@ -266,7 +269,7 @@ def log_attendance(emp_id, company_id, **kwargs):
             return False
         try:
             with conn.cursor() as cursor:
-                # Auto-detect 'in' vs 'out'
+                # --- 5a. Auto-detect 'in' vs 'out' ---
                 cursor.execute("""
                     SELECT id FROM attendance1 
                     WHERE emp_id = %s AND company_id = %s AND attendance_date = %s 
@@ -283,7 +286,7 @@ def log_attendance(emp_id, company_id, **kwargs):
                     final_check_type = 'out'
                     parent_id = open_checkin[0]
 
-                # Insert attendance record
+                # --- 5b. Insert into attendance1 ---
                 cursor.execute("""
                     INSERT INTO attendance1 
                     (emp_id, company_id, first_name, last_name, attendance_date, attendance_time,
@@ -293,6 +296,48 @@ def log_attendance(emp_id, company_id, **kwargs):
                       attendance_date, attendance_time, final_check_type, camera_name, image_url, parent_id))
                 
                 new_db_id = cursor.fetchone()[0]
+
+                # --- 5c. Log FSM event ---
+                event_type = 'CHECK_IN' if final_check_type == 'in' else 'CHECK_OUT'
+                prev_state = None
+                # Optionally, fetch last state
+                cursor.execute("""
+                    SELECT new_state FROM attendance_fsm_history
+                    WHERE emp_id = %s AND company_id = %s
+                    ORDER BY processed_at DESC LIMIT 1
+                """, (str(emp_id), str(company_id)))
+                last_state_row = cursor.fetchone()
+                if last_state_row:
+                    prev_state = last_state_row[0]
+
+                new_state = final_check_type.upper()
+                cursor.execute("""
+                    INSERT INTO attendance_fsm_history
+                    (emp_id, company_id, event_type, prev_state, new_state, success)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """, (str(emp_id), str(company_id), event_type, prev_state, new_state, True))
+
+                # --- 5d. Update daily summary ---
+                # Ensure a summary row exists
+                cursor.execute("""
+                    INSERT INTO attendance_summary (emp_id, company_id, attendance_date)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (emp_id, company_id, attendance_date) DO NOTHING
+                """, (str(emp_id), str(company_id), attendance_date))
+
+                if final_check_type == 'out' and parent_id:
+                    # Calculate duration in seconds
+                    cursor.execute("SELECT attendance_time FROM attendance1 WHERE id = %s", (parent_id,))
+                    check_in_time = cursor.fetchone()[0]
+                    duration_seconds = (datetime.combine(attendance_date, attendance_time) -
+                                        datetime.combine(attendance_date, check_in_time)).total_seconds()
+                    cursor.execute("""
+                        UPDATE attendance_summary
+                        SET total_work_duration = total_work_duration + make_interval(secs => %s)
+                        WHERE emp_id = %s AND company_id = %s AND attendance_date = %s
+                    """, (int(duration_seconds), str(emp_id), str(company_id), attendance_date))
+
+                # Commit all DB changes together
                 conn.commit()
 
                 # --- 6. TRIGGER WEBHOOK ---
