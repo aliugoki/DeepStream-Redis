@@ -1,0 +1,82 @@
+[pipeline]
+display=1
+num_sources = 4             # Number of input sources for the pipeline
+muxer_batch_size = 4        # Batch size for nvstreammux. Typically match num_sources
+rec_threshold = 0.35
+enable_rtsp_streaming = true      # Enable RTSP server
+is_aarch64=0
+known_face_dir="/workspace/data/known_faces"
+save_feature=0
+save_feature_path="/workspace/data/features"
+rtsp_reconnect_interval = 10
+
+[streammux]
+gpu_id = 0
+batch-size = 4
+width = 1280
+height = 720
+live-source = 1
+nvbuf-memory-type = 0
+batched-push-timeout = 40000
+
+[nvosd]
+process-mode=0
+display-text=1
+
+[[sources]]
+id = "IN"
+uri = "rtsp://admin:Pakistan1122@192.168.10.164:554?transport=tcp"
+type = "entrance"
+num-retry = 5
+rtsp-reconnect-interval-sec = 10
+latency = 200
+
+#[[sources]]
+#id = "OUT"
+#uri = "rtsp://admin:Pakistan1122@192.168.10.172:554?transport=tcp"
+#type = "exit"
+#num-retry = 5
+#rtsp-reconnect-interval-sec = 10
+#latency = 200
+
+#[[sources]]
+#id = "cam1"
+#uri = "rtsp://admin:Admin123@192.168.1.2:554?transport=tcp"
+#type = "exit"
+#num-retry = 5
+#rtsp-reconnect-interval-sec = 10
+#latency = 200
+
+#[[sources]]
+#id = "cam2"
+#uri = "rtsp://admin:Admin123@103.149.33.102:554?transport=tcp"
+#type = "exit"
+#num-retry = 5
+#rtsp-reconnect-interval-sec = 10
+#latency = 200
+
+[pgie]
+config-file-path="/workspace/config/config_yolo.txt"
+
+[sgie]
+config-file-path="/workspace/config/config_arcface.txt"
+
+[tracker]
+config-file-path="/workspace/config/config_tracker_perf.txt"
+
+[tiler]
+width = 1280
+height = 720
+
+[rtsp_server]
+mount-point = "/mystream"    # Tiled stream
+enable_rtsp_streaming = true
+port = 8555
+codec = "H264"
+udpsink-port = 5400           # Base UDP port for camera streams
+udpsink-host = "127.0.0.1"
+
+# Optional: separate mount points per camera
+udpsink-ports = [5400, 5401, 5402, 5403]  
+mount-points = ["/cam0", "/cam1", "/cam2", "/cam3"]  
+
