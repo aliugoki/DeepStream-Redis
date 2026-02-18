@@ -1,4 +1,5 @@
 import os
+from venv import logger
 import psycopg2
 import requests
 import traceback
@@ -7,7 +8,16 @@ import socket
 import uuid
 from datetime import datetime
 from contextlib import contextmanager, closing
+import redis
+import json
 
+# Define this globally in the file so all functions can see it
+redis_client = redis.StrictRedis(
+    host='localhost', 
+    port=6379, 
+    db=0, 
+    decode_responses=True
+)
 
 last_processed_time = {}
 # --- CONFIGURATION ---
@@ -133,6 +143,34 @@ def _init_db_and_migrate():
     except Exception as e:
         print(f"Init DB Error: {e}")
 
+def warmup_user_cache(company_id):
+    """
+    Fetches all employees for a company and pushes them to Redis.
+    Run this at application startup.
+    """
+    logger.info(f"🔥 Warming up Redis cache for Company: {company_id}...")
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT uid, first_name, last_name, emp_id, image_path FROM employees WHERE cid=%s",
+                    (company_id,)
+                )
+                rows = cur.fetchall()
+                
+                pipeline = redis_client.pipeline() # Use pipeline for speed
+                for row in rows:
+                    uid = row[0]
+                    user_data = list(row[1:]) # [fname, lname, emp_id, img]
+                    cache_key = f"user_cache:{company_id}:{uid}"
+                    pipeline.setex(cache_key, 86400, json.dumps(user_data)) # Cache for 24h
+                
+                pipeline.execute()
+                logger.info(f"✅ Successfully cached {len(rows)} users in Redis.")
+    except Exception as e:
+        logger.error(f"❌ Warmup failed: {e}")
+
+
 # --- WEBHOOK LOGIC ---
 
 def prepare_webhook_payload(record, image_path):
@@ -191,21 +229,61 @@ def mark_attendance_sent(attendance_id, response_text):
             conn.commit()
 
 # --- CORE LOGIC ---
+import json
+import logging
+
+logger = logging.getLogger("AttendanceSystem")
 
 def get_user_info(emp_id, company_id):
-    """Retrieves user details. Returns 4 values for probe.py compatibility."""
-    with get_db_connection() as conn:
-        if not conn: return (None, None, None, None)
-        with conn.cursor() as cursor:
-            cursor.execute("""
-                SELECT first_name, last_name, emp_id, image_path 
-                FROM user_data WHERE emp_id = %s AND company_id = %s
-            """, (str(emp_id), str(company_id)))
-            user = cursor.fetchone()
-            # Index-based: 0=first, 1=last, 2=id, 3=path
-            if user:
-                return (user[0], user[1], user[2], user[3])
-            return (None, None, None, None)
+    cache_key = f"user_cache:{company_id}:{emp_id}"
+    
+    # --- 1. Try Redis First ---
+    try:
+        cached_data = redis_client.get(cache_key)
+        if cached_data:
+            #logger.info(f"[CACHE HIT] Redis used for emp_id={emp_id}")
+            user = json.loads(cached_data)
+            return (user[0], user[1], user[2], user[3])
+        else:
+            logger.info(f"[CACHE MISS] Redis miss for emp_id={emp_id}")
+    except Exception as e:
+        logger.error(f"Redis Lookup Error: {e}")
+
+    # --- 2. Database Fallback ---
+    try:
+        logger.info(f"[DB QUERY] Fetching from PostgreSQL for emp_id={emp_id}")
+        
+        with get_db_connection() as conn:
+            if not conn: 
+                return (None, None, None, None)
+            
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                    SELECT first_name, last_name, emp_id, image_path 
+                    FROM user_data 
+                    WHERE emp_id = %s AND company_id = %s
+                """, (str(emp_id), str(company_id)))
+                
+                user = cursor.fetchone()
+                
+                if user:
+                    # Convert to list for JSON serialization
+                    user_list = [user[0], user[1], user[2], user[3]]
+                    
+                    # 🔥 Save to Redis for 24 hours (86400 seconds)
+                    # This prevents the "Too Many Clients" crash on subsequent frames
+                    try:
+                        redis_client.setex(cache_key, 86400, json.dumps(user_list))
+                    except Exception as re:
+                        logger.error(f"Failed to update Redis cache: {re}")
+                        
+                    return (user[0], user[1], user[2], user[3])
+                    
+    except Exception as e:
+        logger.error(f"Postgres Query Error: {e}")
+
+    # --- 3. Final Fallback ---
+    return (None, None, None, None)
 
 def log_attendance(emp_id, company_id, **kwargs):
     """

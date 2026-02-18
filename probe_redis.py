@@ -298,9 +298,9 @@ def sgie_feature_extract_probe(pad, info, user_data):
                                 "emp_id": uid,
                                 "first_name": fname,
                                 "last_name": lname,
-                                "image_url": img_path,
-                                "attendance_date": now.strftime("%d-%m-%Y"),
-                                "attendance_time": now.strftime("%H:%M:%S"),
+                                "image_url": save_path,
+                                "attendance_date": now.date(),
+                                "attendance_time": now.time(),
                                 "check_type": direction or "auto",
                                 "camera_name": f"Camera_{src_id}"
                             })
@@ -308,21 +308,7 @@ def sgie_feature_extract_probe(pad, info, user_data):
                             logger.warning(
                                 f"Attendance queue full – skipped emp_id={uid} cam={src_id}"
                             )
-
-                        # --- FSM Event Trigger ---
-                        try:
-                            from utils.attendance_fsm import process_event
-                            process_event(
-                                emp_id=uid,
-                                company_id=COMPANY_ID,
-                                detected_event=direction or "IN",
-                                camera_name=f"Camera_{src_id}",
-                                image_url=img_path
-                            )
-                        except Exception as e:
-                            logger.error(f"FSM Error: {e}")
-
-
+ 
             add_label(frame_meta, batch_meta, name_label, obj_meta.rect_params.left, obj_meta.rect_params.top - 20)
             l_obj = l_obj.next
         
@@ -375,6 +361,7 @@ def attendance_worker(q):
 
         except Exception as e:
             logger.error(f"Worker Error: {e}")
+
 
 
 def attach_sgie_probe(sgie, loaded_faces, attendance_queue, sources):
